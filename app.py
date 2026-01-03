@@ -1,183 +1,109 @@
 import gradio as gr
 from PIL import Image, ImageDraw, ImageFont
-import re
 
-CANVAS_W, CANVAS_H = 900, 550
-MARGIN_X, MARGIN_Y = 50, 50
+# ----------------------------
+# Utility functions
+# ----------------------------
+def parse_plot_size(text):
+    w, h = text.lower().replace(" ", "").split("x")
+    return int(w), int(h)
 
+def parse_rooms(text):
+    rooms = []
+    for line in text.strip().split("\n"):
+        name, w, h = line.split(",")
+        rooms.append({
+            "name": name.strip(),
+            "w": int(w),
+            "h": int(h)
+        })
+    return rooms
 
-# ======================================================
-# 1️⃣ INTENT PARSER (STRICT, NO HALLUCINATION)
-# ======================================================
-def parse_prompt(prompt):
-    prompt = prompt.lower()
+# ----------------------------
+# Raw floor plan generator
+# ----------------------------
+def generate_raw_plan(plot_size, room_text):
+    plot_w, plot_h = parse_plot_size(plot_size)
+    rooms = parse_rooms(room_text)
 
-    def count(word):
-        m = re.search(r"(\d+)\s*" + word, prompt)
-        return int(m.group(1)) if m else 0
+    CANVAS_W, CANVAS_H = 900, 600
+    MARGIN = 40
 
-    layout = {
-        "living_room": 1 if any(w in prompt for w in ["living", "hall"]) else 0,
-        "bedrooms": count("bedroom"),
-        "bathrooms": count("bathroom"),
-        "kitchen": 1 if any(w in prompt for w in ["kitchen", "ktchen"]) else 0,
-        "garage": 1 if "garage" in prompt else 0
-    }
+    # Scale factor
+    scale_x = (CANVAS_W - 2 * MARGIN) / plot_w
+    scale_y = (CANVAS_H - 2 * MARGIN) / plot_h
+    scale = min(scale_x, scale_y)
 
-    # Handle "bed" without number
-    if layout["bedrooms"] == 0 and "bed" in prompt:
-        layout["bedrooms"] = 1
+    img = Image.new("RGB", (CANVAS_W, CANVAS_H), "#f2f2f2")
+    draw = ImageDraw.Draw(img)
 
-    # Safety: at least one room
-    if sum(layout.values()) == 0:
-        raise ValueError("No rooms detected. Please specify rooms clearly.")
+    try:
+        font = ImageFont.load_default()
+    except:
+        font = None
 
-    return layout
+    # Draw plot boundary
+    plot_px_w = int(plot_w * scale)
+    plot_px_h = int(plot_h * scale)
 
+    px0 = MARGIN
+    py0 = MARGIN
+    px1 = px0 + plot_px_w
+    py1 = py0 + plot_px_h
 
-# ======================================================
-# 2️⃣ ROOM GEOMETRY ENGINE (DETERMINISTIC)
-# ======================================================
-def compute_room_positions(layout):
-    positions = {}
-    x, y = MARGIN_X, MARGIN_Y
+    draw.rectangle([px0, py0, px1, py1], outline="black", width=6)
+    draw.text((px0, py0 - 15), f"PLOT {plot_w} x {plot_h}", fill="black", font=font)
 
-    def next_row(h):
-        nonlocal x, y
-        x = MARGIN_X
-        y += h + 40
+    # Place rooms
+    cursor_x = px0 + 10
+    cursor_y = py0 + 10
+    row_height = 0
 
-    # Living room
-    if layout["living_room"]:
-        positions["living_room"] = (x, y, 320, 180)
-        x += 360
+    for room in rooms:
+        rw = int(room["w"] * scale)
+        rh = int(room["h"] * scale)
 
-    # Kitchen
-    if layout["kitchen"]:
-        positions["kitchen"] = (x, y, 220, 140)
-        next_row(180)
+        # Move to next row if overflow
+        if cursor_x + rw > px1:
+            cursor_x = px0 + 10
+            cursor_y += row_height + 15
+            row_height = 0
 
-    # Bedrooms
-    for i in range(layout["bedrooms"]):
-        key = f"bedroom_{i+1}"
-        positions[key] = (x, y, 220, 160)
-        x += 260
-        if x + 220 > CANVAS_W:
-            next_row(160)
-
-    # Bathrooms
-    for i in range(layout["bathrooms"]):
-        key = f"bathroom_{i+1}"
-        positions[key] = (x, y, 160, 120)
-        x += 200
-        if x + 160 > CANVAS_W:
-            next_row(120)
-
-    # Garage
-    if layout["garage"]:
-        positions["garage"] = (x, y, 300, 170)
-
-    return positions
-
-
-# ======================================================
-# 3️⃣ RAW ENGINEERING PLAN (WOW TECHNICAL LOOK)
-# ======================================================
-def draw_raw_plan(positions):
-    img = Image.new("RGB", (CANVAS_W, CANVAS_H), "white")
-    d = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
-
-    for room, (x, y, w, h) in positions.items():
-        # Outer wall
-        d.rectangle([x, y, x + w, y + h], outline="black", width=4)
-
-        # Door
-        door_w = 35
-        d.line([x + w//2, y + h, x + w//2 + door_w, y + h], fill="black", width=3)
-
-        # Label
-        label = room.replace("_", " ").title()
-        d.text((x + 8, y + 6), label, fill="black", font=font)
-
-    return img
-
-
-# ======================================================
-# 4️⃣ 3D ENGINEERING PLAN (DEPTH + FURNITURE)
-# ======================================================
-ROOM_COLORS = {
-    "living_room": "#e3f2fd",
-    "bedroom": "#e8f5e9",
-    "kitchen": "#fff9c4",
-    "bathroom": "#fce4ec",
-    "garage": "#d7ccc8"
-}
-
-def draw_3d_plan(positions):
-    img = Image.new("RGB", (CANVAS_W, CANVAS_H), "#f0f0f0")
-    d = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
-    depth = 18
-
-    for room, (x, y, w, h) in positions.items():
-        base = room.split("_")[0]
-        color = ROOM_COLORS.get(base, "#eeeeee")
-
-        # Shadow
-        d.rectangle(
-            [x + depth, y + depth, x + w + depth, y + h + depth],
-            fill="#bdbdbd"
+        # Draw room
+        draw.rectangle(
+            [cursor_x, cursor_y, cursor_x + rw, cursor_y + rh],
+            outline="black",
+            width=4
         )
 
-        # Room
-        d.rectangle([x, y, x + w, y + h], fill=color, outline="black", width=3)
-
         # Label
-        d.text((x + 8, y + 6), room.replace("_", " ").title(), fill="black", font=font)
+        label = f'{room["name"]}\n{room["w"]}x{room["h"]}'
+        draw.text((cursor_x + 5, cursor_y + 5), label, fill="black", font=font)
 
-        # Furniture (iconic)
-        if "bedroom" in room:
-            d.rectangle([x+20, y+50, x+120, y+120], fill="#bcaaa4")
-        elif "kitchen" in room:
-            d.rectangle([x+15, y+40, x+80, y+110], fill="#aed581")
-            d.rectangle([x+90, y+40, x+150, y+80], fill="#ffab91")
-        elif "living" in room:
-            d.rectangle([x+30, y+60, x+150, y+120], fill="#90caf9")
-        elif "bathroom" in room:
-            d.ellipse([x+50, y+50, x+90, y+90], fill="#b39ddb")
-        elif "garage" in room:
-            d.rectangle([x+40, y+50, x+200, y+120], fill="#90a4ae")
+        cursor_x += rw + 15
+        row_height = max(row_height, rh)
 
     return img
 
-
-# ======================================================
-# 5️⃣ MAIN PIPELINE
-# ======================================================
-def generate_floor_plans(prompt):
-    layout = parse_prompt(prompt)
-    positions = compute_room_positions(layout)
-    raw = draw_raw_plan(positions)
-    three_d = draw_3d_plan(positions)
-    return raw, three_d
-
-
-# ======================================================
-# 6️⃣ GRADIO APP (HF READY)
-# ======================================================
+# ----------------------------
+# Gradio UI
+# ----------------------------
 demo = gr.Interface(
-    fn=generate_floor_plans,
-    inputs=gr.Textbox(
-        label="Describe your floor plan",
-        placeholder="Example: 1 bedroom and 1 kitchen"
-    ),
-    outputs=[
-        gr.Image(label="Raw Engineering Floor Plan (2D)"),
-        gr.Image(label="3D Engineering Floor Plan")
+    fn=generate_raw_plan,
+    inputs=[
+        gr.Textbox(label="Total Plot Size (W x H)", placeholder="Example: 40x30"),
+        gr.Textbox(
+            label="Rooms (one per line: Name,Width,Height)",
+            placeholder="Bedroom,12,10\nKitchen,8,7\nBathroom,6,5",
+            lines=6
+        )
     ],
-    title="VOICE2PLAN-AI",
-    description="AI-assisted civil engineering floor plan generator with synchronized 2D technical and 3D visualization."
+    outputs=gr.Image(label="Raw Civil Floor Plan (2D)"),
+    title="VOICE2PLAN-AI | Professional Raw Civil Floor Plan Generator",
+    description=(
+        "Enter exact plot size and room dimensions. "
+        "Generates a clean, technical, judge-ready raw floor plan."
+    )
 )
 
 demo.launch()
