@@ -303,6 +303,99 @@ def generate_step_2(state):
         gr.Warning(f"3D Generation Error: {str(e)}")
         return gr.update(visible=True)
 
+# Voice Recognition Setup (Startup Logic)
+try:
+    print("Loading Whisper Model... this may take a moment.")
+    from transformers import pipeline
+    # Switch to 'base.en' for better accuracy (slightly slower but worth it)
+    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-base.en")
+    print("Whisper Model Loaded Successfully.")
+except Exception as e:
+    print(f"Failed to load Whisper: {e}")
+    asr_pipe = None
+
+def parse_natural_language(text):
+    """
+    Attempts to extract room details from natural language.
+    Expected patterns: "Kitchen 15 by 10 center", "Master Bedroom 14 x 12 top left"
+    Returns formatted string "Name, W, H, Pos" or original text if parsing fails.
+    """
+    import re
+    
+    # Pre-process: Convert number words to digits (simple mapping for house sizes)
+    # Whisper often outputs "fifteen" instead of "15"
+    word_to_num = {
+        "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+        "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15",
+        "sixteen": "16", "seventeen": "17", "eighteen": "18", "nineteen": "19", "twenty": "20",
+        "thirty": "30", "forty": "40", "fifty": "50", "sixty": "60"
+    }
+    
+    text_lower = text.lower()
+    for word, digit in word_to_num.items():
+        text_lower = text_lower.replace(word, digit)
+        
+    print(f"DEBUG: Parsing '{text}' -> Normalized: '{text_lower}'") # Log for debugging
+    
+    # 1. Extract Room Name (Keywords)
+    room_types = ["master bedroom", "bedroom", "kitchen", "living room", "living", "dining room", "dining", "bathroom", "bath", "garage", "office", "study", "hall", "patio", "deck"]
+    name = "Room"
+    for r in room_types:
+        if r in text_lower:
+            # Try to grab the matched name neatly
+            start_idx = text_lower.find(r)
+            name = text[start_idx : start_idx+len(r)].title()
+            break
+            
+    # 2. Extract Dimensions (e.g., "15 by 12", "15x12", "15 12")
+    # Matches: number followed by x, by, or space, then number
+    dims = re.search(r'(\d+)\s*(?:x|by|\s)\s*(\d+)', text_lower)
+    w, h = 10, 10 # Defaults
+    if dims:
+        w = int(dims.group(1))
+        h = int(dims.group(2))
+    else:
+        # Fallback: look for just two numbers anywhere
+        nums = re.findall(r'\d+', text_lower)
+        if len(nums) >= 2:
+            w = int(nums[0])
+            h = int(nums[1])
+    
+    # 3. Extract Position
+    pos = "any"
+    if "top left" in text_lower or "top-left" in text_lower: pos = "top-left"
+    elif "top right" in text_lower or "top-right" in text_lower: pos = "top-right"
+    elif "bottom left" in text_lower or "bottom-left" in text_lower: pos = "bottom-left"
+    elif "bottom right" in text_lower or "bottom-right" in text_lower: pos = "bottom-right"
+    elif "center" in text_lower or "middle" in text_lower: pos = "center"
+    
+    result = f"{name}, {w}, {h}, {pos}"
+    print(f"DEBUG: Result -> {result}")
+    return result
+
+def transcribe_voice(audio_path, current_text):
+    global asr_pipe
+    if audio_path is None or asr_pipe is None:
+        return current_text
+    
+    try:
+        text = asr_pipe(audio_path)["text"]
+        text = text.strip()
+        
+        if not text: return current_text
+        
+        # Smart Parse the transcribed text
+        parsed_text = parse_natural_language(text)
+        
+        # Append to existing text
+        if current_text:
+            return current_text + "\n" + parsed_text
+        return parsed_text
+    except Exception as e:
+        gr.Warning(f"Voice Error: {str(e)}")
+        return current_text
+
 custom_css = """
 .container { max-width: 1200px; margin: auto; padding: 20px; }
 .gr-button { font-weight: bold; }
@@ -318,7 +411,12 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="CivilPlan AI 2.0")
         with gr.Column(scale=1):
             gr.Markdown("### Configuration")
             p_in = gr.Textbox(label="Plot Size (ft)", value="40x30", info="Width x Depth")
+            
             r_in = gr.Textbox(label="Rooms (Name, Width, Depth, Position)", value="Master Bedroom, 14, 12, top-left\nLiving, 20, 15, center\nKitchen, 12, 10, bottom-right\nBath, 8, 6, any", lines=5)
+            
+            # Voice Input
+            audio_in = gr.Audio(sources=["microphone"], type="filepath", label="🎙️ Voice Input (Dictate Rooms)")
+            
             btn_gen = gr.Button("Generate 2D Plan", variant="primary")
             status_txt = gr.Markdown("")
             
@@ -326,6 +424,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="CivilPlan AI 2.0")
             gr.Markdown("### Preview & Confirm")
             img_out = gr.Image(label="2D Blueprint", type="pil", interactive=False)
             btn_3d = gr.Button("Confirm & Build 3D View", size="lg", visible=False)
+            
+    # Event for Voice
+    audio_in.stop_recording(transcribe_voice, [audio_in, r_in], [r_in])
     
     with gr.Row():
         plot_out = gr.Plot(label="3D Dollhouse View", visible=False)
