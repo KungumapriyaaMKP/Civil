@@ -25,11 +25,14 @@ def parse_rooms(text):
             key_name = name.lower()
             
             # Floor colors (Carpet/Tile simulation)
-            if "bed" in key_name:     floor = "#d4c5a9" # Beige Carpet
-            elif "bath" in key_name:  floor = "#b3e5fc" # Blue Tile
-            elif "kitchen" in key_name: floor = "#ffe0b2" # Wood/Tile
-            elif "living" in key_name: floor = "#e0e0e0" # Light Grey
-            else: floor = f"rgb({random.randint(200,240)}, {random.randint(200,240)}, {random.randint(200,240)})"
+            # Floor colors (Architectural Palette)
+            if "bed" in key_name:     floor = "#E8EAF6" # Indigo 50 (Calm)
+            elif "bath" in key_name:  floor = "#E1F5FE" # Light Blue (Clean)
+            elif "kitchen" in key_name: floor = "#EFEBE9" # Brown 50 (Stone/Tile)
+            elif "living" in key_name: floor = "#FAFAFA" # Off White
+            elif "dining" in key_name: floor = "#F3E5F5" # Purple 50
+            elif "garage" in key_name: floor = "#CFD8DC" # Blue Grey
+            else: floor = "#F5F5F5" # Default Light Grey
 
             rooms.append({
                 "name": name,
@@ -219,14 +222,20 @@ def create_3d_plot(plot_w, plot_h, rooms, placed, scale):
         # 1. FLOOR (Plane)
         # To avoid z-fighting with plot base, lift slightly
         z_floor = 0.1
+        
+        # Hover Text
+        hover_txt = f"<b>{r['name']}</b><br>{r['w']}ft x {r['h']}ft<br>Area: {r['area']} sq ft"
+        
         fig.add_trace(go.Mesh3d(
             x=[gx, gx+gw, gx+gw, gx],
             y=[gy, gy, gy+gh, gy+gh],
             z=[z_floor, z_floor, z_floor, z_floor],
             i=[0, 0], j=[1, 2], k=[2, 3], # Simple quad triangulation
             color=r["floor_color"],
-            name=f"{r['name']} Floor",
-            flatshading=True
+            name=f"{r['name']}",
+            flatshading=True,
+            hoverinfo="text",
+            hovertext=hover_txt
         ))
         
         # 2. WALLS
@@ -246,11 +255,57 @@ def create_3d_plot(plot_w, plot_h, rooms, placed, scale):
         # East Wall (x = w)
         fig.add_trace(make_box(gx+gw-wall_thickness, gy, 0, wall_thickness, gh, wall_height, "#ffffff", f"{r['name']} Wall"))
 
+        # 3. Simple Furniture (Procedural)
+        # Adds scale and realism
+        key = r["key"]
+        
+        # Bed (in bedroom)
+        if "bed" in key:
+            bw, bh, bd = 6, 7, 2 # Standard bed size
+            # Try to place in center
+            bx = gx + (gw - bw)/2
+            by = gy + (gh - bh)/2
+            # Mattress
+            fig.add_trace(make_box(bx, by, 0, bw, bh, bd, "#FFFFFF", "Bed"))
+            # Headboard
+            fig.add_trace(make_box(bx, by, 0, bw, 1, 4, "#5D4037", "Headboard"))
+            # Pillow
+            fig.add_trace(make_box(bx, by+1, bd, bw, 1.5, 0.5, "#E0E0E0", "Pillow"))
+            
+        # Kitchen Counters
+        elif "kitchen" in key:
+            depth = 2
+            # L-Shape: Top wall + Left wall
+            # Top strip
+            fig.add_trace(make_box(gx, gy, 0, gw, depth, 3, "#BDBDBD", "Counter"))
+            # Left strip
+            fig.add_trace(make_box(gx, gy+depth, 0, depth, gh-depth, 3, "#BDBDBD", "Counter"))
+            
+        # Dining Table
+        elif "dining" in key:
+            tw, th = 5, 5
+            tx = gx + (gw-tw)/2
+            ty = gy + (gh-th)/2
+            # Table Top
+            fig.add_trace(make_box(tx, ty, 2.5, tw, th, 0.2, "#8D6E63", "Table"))
+            # Legs (Simplified as one block)
+            fig.add_trace(make_box(tx+1, ty+1, 0, tw-2, th-2, 2.5, "#4E342E", "Legs"))
+            
+        # Living Room (Sofa + Rug)
+        elif "living" in key:
+            # Rug
+            fig.add_trace(make_box(gx+2, gy+2, 0.1, gw-4, gh-4, 0.05, "#90A4AE", "Rug"))
+            # Sofa (Simple box against top wall)
+            sw, sh, sd = 8, 3, 2.5
+            sx = gx + (gw-sw)/2
+            sy = gy + 2
+            fig.add_trace(make_box(sx, sy, 0, sw, sh, sd, "#546E7A", "Sofa"))
+
     # Update Camera (Isometric View)
     fig.update_layout(
         scene = dict(
             xaxis = dict(title='Width (ft)', range=[0, plot_w]),
-            yaxis = dict(title='Depth (ft)', range=[0, plot_h]),
+            yaxis = dict(title='Depth (ft)', range=[plot_h, 0]), # Reversed to match 2D Top-Down view
             zaxis = dict(title='Height (ft)', range=[0, 15]),
             aspectmode='manual',
             aspectratio=dict(x=1, y=plot_h/plot_w, z=0.3)
@@ -307,8 +362,9 @@ def generate_step_2(state):
 try:
     print("Loading Whisper Model... this may take a moment.")
     from transformers import pipeline
-    # Switch to 'base.en' for better accuracy (slightly slower but worth it)
-    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-base.en")
+    # OPTIMIZATION: Reverting to 'tiny.en' for speed (Base was causing timeouts/Failed to Fetch)
+    # The 'Smart Parser' below will handle accuracy issues like "twenty" -> "20"
+    asr_pipe = pipeline("automatic-speech-recognition", model="openai/whisper-tiny.en")
     print("Whisper Model Loaded Successfully.")
 except Exception as e:
     print(f"Failed to load Whisper: {e}")
@@ -323,7 +379,6 @@ def parse_natural_language(text):
     import re
     
     # Pre-process: Convert number words to digits (simple mapping for house sizes)
-    # Whisper often outputs "fifteen" instead of "15"
     word_to_num = {
         "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
         "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
@@ -343,20 +398,17 @@ def parse_natural_language(text):
     name = "Room"
     for r in room_types:
         if r in text_lower:
-            # Try to grab the matched name neatly
             start_idx = text_lower.find(r)
             name = text[start_idx : start_idx+len(r)].title()
             break
             
-    # 2. Extract Dimensions (e.g., "15 by 12", "15x12", "15 12")
-    # Matches: number followed by x, by, or space, then number
+    # 2. Extract Dimensions
     dims = re.search(r'(\d+)\s*(?:x|by|\s)\s*(\d+)', text_lower)
     w, h = 10, 10 # Defaults
     if dims:
         w = int(dims.group(1))
         h = int(dims.group(2))
     else:
-        # Fallback: look for just two numbers anywhere
         nums = re.findall(r'\d+', text_lower)
         if len(nums) >= 2:
             w = int(nums[0])
@@ -385,10 +437,8 @@ def transcribe_voice(audio_path, current_text):
         
         if not text: return current_text
         
-        # Smart Parse the transcribed text
         parsed_text = parse_natural_language(text)
         
-        # Append to existing text
         if current_text:
             return current_text + "\n" + parsed_text
         return parsed_text
@@ -401,6 +451,10 @@ custom_css = """
 .gr-button { font-weight: bold; }
 """
 
+# STARTUP FIX: Move theme/css to Blocks, but in simple way to support older versions too? 
+# The warning said move to launch(). Let's keep Blocks clean and pass to launch if possible?
+# Actually, let's just ignore the warning for now to minimize structural changes, 
+# BUT fixing the model size is the priority.
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="CivilPlan AI 2.0") as demo:
     
     state = gr.State()
@@ -435,4 +489,4 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css, title="CivilPlan AI 2.0")
     btn_3d.click(generate_step_2, [state], [plot_out])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch()
