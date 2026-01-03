@@ -18,7 +18,8 @@ def parse_rooms(text):
         if len(parts) < 3:
             continue
         rooms.append({
-            "name": parts[0].strip(),
+            "name": parts[0].strip(),                  # Original name for labeling
+            "name_lower": parts[0].strip().lower(),    # Lowercase for lookups
             "w": int(parts[1]),
             "h": int(parts[2]),
             "pos": parts[3].strip().lower() if len(parts) > 3 else "any"
@@ -82,6 +83,7 @@ def generate_raw_plan(plot_size, room_text):
     for room in rooms:
         rw, rh = int(room["w"] * scale), int(room["h"] * scale)
         pos = room["pos"]
+        name = room["name_lower"]
 
         if pos == "top-right":
             x, y = px1 - rw - PADDING, py0 + PADDING
@@ -95,7 +97,7 @@ def generate_raw_plan(plot_size, room_text):
             x, y = px0 + (px1 - px0)//2 - rw//2, py0 + (py1 - py0)//2 - rh//2
         elif pos == "entrance":
             x, y = px0 + (px1 - px0)//2 - rw//2, py1 - rh - PADDING
-        elif "-of-" not in pos:  # will handle in second pass
+        elif "-of-" not in pos:  # auto placement handled later
             x, y = None, None
         else:
             x, y = None, None
@@ -109,7 +111,7 @@ def generate_raw_plan(plot_size, room_text):
                     y = py0 + PADDING
                     x += 10
                 attempts += 1
-            placed[room["name"].lower()] = (x, y, rw, rh)
+            placed[name] = (x, y, rw, rh)
 
     # ----------------------------
     # Second pass: relative & auto placement
@@ -117,7 +119,7 @@ def generate_raw_plan(plot_size, room_text):
     cursor_x, cursor_y = px0 + PADDING, py0 + PADDING + 150
 
     for room in rooms:
-        name = room["name"].lower()
+        name = room["name_lower"]
         if name in placed:
             continue
 
@@ -127,8 +129,8 @@ def generate_raw_plan(plot_size, room_text):
         # Relative position
         if "-of-" in pos:
             parts = pos.split("-of-")
-            direction = "-of".join(parts[:-1])  # handles compound like bottom-left-of
-            target_name = parts[-1]
+            direction = "-of".join(parts[:-1]).lower()  # ensures proper direction
+            target_name = parts[-1].strip().lower()     # lowercase
             if target_name in placed and direction in direction_map:
                 tx, ty, tw, th = placed[target_name]
                 x, y = direction_map[direction](tx, ty, tw, th, rw, rh)
@@ -157,7 +159,7 @@ def generate_raw_plan(plot_size, room_text):
     # Draw rooms
     # ----------------------------
     for room in rooms:
-        name = room["name"].lower()
+        name = room["name_lower"]
         x, y, rw, rh = placed[name]
         draw.rectangle([x, y, x + rw, y + rh], outline="black", width=4)
         label = f'{room["name"]}\n{room["w"]}x{room["h"]}'
@@ -179,7 +181,7 @@ demo = gr.Interface(
             placeholder=(
                 "Bedroom,12,10,top-right\n"
                 "Kitchen,8,7,center\n"
-                "Pooja,5,5,bottom-left-of-Bedroom\n"
+                "Pooja,5,5,bottom-of-Bedroom\n"
                 "Garage,14,10,entrance\n"
                 "Bathroom,6,5,any\n"
                 "Living Room,10,12,bottom-left\n"
